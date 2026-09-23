@@ -182,7 +182,9 @@ async function chat(req,env){
   const body=await req.json().catch(()=>null);
   if(!body?.messages||!Array.isArray(body.messages)||body.messages.length===0)return json({error:{message:"messages must be a non-empty array",type:"invalid_request_error"}},400);
 
-  const hasImage=body.messages.some(m=>Array.isArray(m?.content)&&m.content.some(part=>part?.type==="image_url"||part?.type==="image"));\n  const model=hasImage?(env.NEXORA_VISION_MODEL||"@cf/qwen/qwen3.8-27b"):(env.NEXORA_MODEL||"@cf/openai/gpt-oss-120b");\n  const publicModel=env.NEXORA_MODEL_NAME||"nexora-coder";
+  const hasImage=body.messages.some(m=>Array.isArray(m?.content)&&m.content.some(part=>part?.type==="image_url"||part?.type==="image"));
+  const model=hasImage?(env.NEXORA_VISION_MODEL||"@cf/qwen/qwen3.8-27b"):(env.NEXORA_MODEL||"@cf/openai/gpt-oss-120b");
+  const publicModel=env.NEXORA_MODEL_NAME||"nexora-coder";
   const input={
     messages:normalizeMessages(body.messages),
     temperature:body.temperature??0.15,

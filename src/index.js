@@ -40,7 +40,7 @@ async function turso(env,sql,args=[]){
   if(!token)throw new Error("TURSO_AUTH_TOKEN is not configured");
   const response=await fetch(tursoUrl(env),{
     method:"POST",
-    headers:{"content-type":"application/json","authorization:"Bearer "+token},
+    headers:{"content-type":"application/json","authorization":"Bearer "+token},
     body:JSON.stringify({requests:[{type:"execute",stmt:{sql,args:args.map(tursoArg)}},{type:"close"}]})
   });
   if(!response.ok)throw new Error("Turso request failed: "+response.status+" "+await response.text());

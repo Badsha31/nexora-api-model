@@ -200,10 +200,11 @@ async function chat(req,env){
 
   try{
     const result=await env.AI.run(model,input);
-    const generatedText=result?.response??result?.output_text??result?.text??"";
-    const toolCalls=Array.isArray(result?.tool_calls)?result.tool_calls:[];
-    const usage=result?.usage||{};
-    const message={role:"assistant",content:typeof generatedText==="string"?generatedText:(generatedText==null?null:JSON.stringify(generatedText))};
+    const generatedText=result?.response??result?.output_text??result?.text??result?.choices?.[0]?.message?.content??result?.choices?.[0]?.text??result?.output?.[0]?.content??"";
+    const toolCalls=Array.isArray(result?.tool_calls)?result.tool_calls:(Array.isArray(result?.choices?.[0]?.message?.tool_calls)?result.choices[0].message.tool_calls:[]);
+    const usage=result?.usage||result?.choices?.[0]?.usage||{};
+    const normalizedText=typeof generatedText==="string"?generatedText:(Array.isArray(generatedText)?generatedText.map(x=>typeof x==="string"?x:(x?.text||x?.content||"")).join(""):generatedText==null?"":JSON.stringify(generatedText));
+    const message={role:"assistant",content:normalizedText||null};
     if(toolCalls.length)message.tool_calls=toolCalls;
 
     if(keyRow)await turso(env,"INSERT INTO usage(key_id,model,tokens_in,tokens_out,created_at) VALUES(?,?,?,?,?)",[keyRow.id,model,usage.prompt_tokens??usage.input_tokens??null,usage.completion_tokens??usage.output_tokens??null,now()]);

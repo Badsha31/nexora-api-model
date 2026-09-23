@@ -50,6 +50,30 @@ async function turso(env,sql,args=[]){
   return first?.response?.result||first?.result||{};
 }
 
+async function ensureSchema(env){
+  await turso(env,`CREATE TABLE IF NOT EXISTS api_keys (
+    id TEXT PRIMARY KEY,
+    key_hash TEXT NOT NULL UNIQUE,
+    key_prefix TEXT NOT NULL,
+    label TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    request_count INTEGER NOT NULL DEFAULT 0
+  )`);
+  await turso(env,`CREATE TABLE IF NOT EXISTS usage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(key_id) REFERENCES api_keys(id)
+  )`);
+  await turso(env,`CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash)`);
+  await turso(env,`CREATE INDEX IF NOT EXISTS idx_usage_key_created ON usage(key_id, created_at)`);
+}
+
 async function tursoFirst(env,sql,args=[]){
   const result=await turso(env,sql,args);
   return rowsToObjects(result)[0]||null;
@@ -75,6 +99,7 @@ function adminOk(req,env){
 }
 
 async function requireKey(req,env){
+  await ensureSchema(env);
   const auth=req.headers.get("Authorization")||"";
   const key=auth.startsWith("Bearer ")?auth.slice(7).trim():"";
   if(!key.startsWith("nxa_"))throw new Error("INVALID_API_KEY");
@@ -91,6 +116,7 @@ function corsPreflight(){
 
 async function createKey(req,env){
   if(!adminOk(req,env))return json({error:{message:"Admin authentication required",type:"authentication_error"}},401);
+  await ensureSchema(env);
   const body=await req.json().catch(()=>({}));
   const key=randomKey(),keyId=id(),created=now(),label=String(body.label||"Nexora API Key").slice(0,100);
   await turso(env,"INSERT INTO api_keys(id,key_hash,key_prefix,label,active,created_at) VALUES(?,?,?,?,1,?)",[keyId,await sha256(key),key.slice(0,12),label,created]);
@@ -100,12 +126,14 @@ async function createKey(req,env){
 
 async function listKeys(req,env){
   if(!adminOk(req,env))return json({error:{message:"Admin authentication required"}},401);
+  await ensureSchema(env);
   const results=await tursoAll(env,"SELECT id,key_prefix,label,active,created_at,last_used_at,request_count FROM api_keys ORDER BY created_at DESC");
   return json({data:results});
 }
 
 async function revoke(req,env,idValue){
   if(!adminOk(req,env))return json({error:{message:"Admin authentication required"}},401);
+  await ensureSchema(env);
   await turso(env,"UPDATE api_keys SET active=0 WHERE id=?",[idValue]);
   return json({ok:true,id:idValue,active:false});
 }
@@ -209,7 +237,7 @@ async function chat(req,env){
 function adminHtml(){
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Nexora API Admin</title><style>body{font-family:Inter,system-ui;background:#0b0d12;color:#eee;max-width:900px;margin:auto;padding:28px}input,button{padding:12px;border-radius:10px;border:1px solid #333;background:#151923;color:#fff;margin:4px}button{cursor:pointer}section{background:#11151d;border:1px solid #262c38;border-radius:16px;padding:18px;margin:14px 0}code{word-break:break-all}</style></head><body><h1>Nexora API</h1><p>Master Admin</p><section><input id="p" type="password" placeholder="Admin password"><input id="l" placeholder="Key label"><button onclick="gen()">Generate API Key</button><pre id="out"></pre></section><section><button onclick="load()">Refresh keys</button><div id="keys"></div></section><script>
 const p=()=>document.getElementById("p").value;
-async function gen(){const r=await fetch("/admin/keys",{method:"POST",headers:{"X-Admin-Password":p(),"content-type":"application/json"},body:JSON.stringify({label:document.getElementById("l").value})});document.getElementById("out").textContent=JSON.stringify(await r.json(),null,2);load()}
+async function gen(){const r=await fetch("/admin/keys",{method:"POST",headers:{"X-Admin-Password":p(),"content-type":"application/json"},body:JSON.stringify({label:document.getElementById("l").value})});const j=await r.json();document.getElementById("out").textContent=JSON.stringify(j,null,2);if(j.key){document.getElementById("out").textContent+="\\n\\nCOPY THIS API KEY NOW — IT IS SHOWN ONLY ONCE.\\n\\nMODEL URL: "+j.model_url+"\\nCHAT URL: "+j.chat_completions_url+"\\nMODELS URL: "+j.models_url}load()}
 async function load(){const r=await fetch("/admin/keys",{headers:{"X-Admin-Password":p()}});const j=await r.json();document.getElementById("keys").innerHTML=(j.data||[]).map(x=>"<p><b>"+x.label+"</b> — "+x.key_prefix+"… — "+(x.active?"active":"revoked")+" <button onclick='rev(\""+x.id+"\")'>Revoke</button></p>").join("")}
 async function rev(id){await fetch("/admin/keys/"+id,{method:"DELETE",headers:{"X-Admin-Password":p()}});load()}
 </script></body></html>`;
@@ -229,7 +257,7 @@ export default {async fetch(req,env){
     if(u.pathname==="/v1/chat/completions"&&req.method==="POST")return chat(req,env);
     if(u.pathname==="/health"&&req.method==="GET"){
       const health={ok:true,service:"nexora-api",model:env.NEXORA_MODEL_NAME||"nexora-coder",provider:"cloudflare-workers-ai",database:"configured",ai_binding:!!env.AI};
-      try{await turso(env,"SELECT 1");health.database="connected";}catch(e){health.ok=false;health.database="error";health.database_error=String(e?.message||e);}
+      try{await turso(env,"SELECT 1");await ensureSchema(env);health.database="connected";}catch(e){health.ok=false;health.database="error";health.database_error=String(e?.message||e);}
       if(!env.AI)health.ok=false;
       return json(health,health.ok?200:503);
     }

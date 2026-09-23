@@ -7,7 +7,7 @@ Production-oriented Cloudflare Worker API/control plane for Nexora AI.
 - OpenAI-compatible `/v1/models`
 - OpenAI-compatible `/v1/chat/completions`
 - Cloudflare Workers AI inference
-- D1-backed API key storage
+- Turso-backed API key and usage storage
 - SHA-256 hashed API keys at rest
 - Master Admin password
 - Generate/revoke API keys
@@ -19,18 +19,21 @@ Production-oriented Cloudflare Worker API/control plane for Nexora AI.
 
 ## Deploy
 
-1. Install Node.js 22+.
-2. Install dependencies:
+1. Keep the Worker connected to your Turso database.
+2. In Cloudflare Worker Secrets/Variables, set:
+   - `TURSO_DATABASE_URL` — your Turso `libsql://...` URL
+   - `TURSO_AUTH_TOKEN` — your Turso auth token (Secret)
+   - `NEXORA_ADMIN_PASSWORD` — Master Admin password (Secret)
+3. Build command:
    `npm install`
-3. Create D1:
-   `npx wrangler d1 create nexora-api`
-4. Put the returned database id into `wrangler.toml`.
-5. Apply migration:
-   `npx wrangler d1 migrations apply nexora-api --remote`
-6. Set the Master Admin password:
-   `npx wrangler secret put NEXORA_ADMIN_PASSWORD`
-7. Deploy:
-   `npm run deploy`
+4. Deploy command:
+   `npx wrangler deploy`
+
+No Cloudflare D1 database or D1 `database_id` is required.
+
+### Turso schema
+
+Run the SQL in `migrations/0001_init.sql` once against your Turso database. The schema creates the `api_keys` and `usage` tables used by the Worker.
 
 After deployment open:
 
@@ -58,4 +61,4 @@ No model can honestly be guaranteed to be the world's best or perfect. This serv
 
 For heavier self-hosted coding models, keep the same OpenAI-compatible contract and place inference behind a suitable GPU service/API gateway rather than trying to run a large model inside a normal Worker.
 
-Never commit admin passwords, API keys, model credentials, or D1 secrets to Git.
+Never commit admin passwords, API keys, model credentials, or Turso secrets to Git.

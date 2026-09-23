@@ -199,9 +199,37 @@ async function chat(req,env){
   if(body.reasoning)input.reasoning=body.reasoning;
 
   try{
-    const result=await env.AI.run(model,input);
-    const generatedText=result?.response??result?.output_text??result?.text??result?.choices?.[0]?.message?.content??result?.choices?.[0]?.text??result?.output?.[0]?.content??"";
-    const toolCalls=Array.isArray(result?.tool_calls)?result.tool_calls:(Array.isArray(result?.choices?.[0]?.message?.tool_calls)?result.choices[0].message.tool_calls:[]);
+    let result=await env.AI.run(model,input);
+    const readGenerated=(value)=>{
+      const candidates=[
+        value?.response,
+        value?.output_text,
+        value?.text,
+        value?.choices?.[0]?.message?.content,
+        value?.choices?.[0]?.text,
+        value?.output?.[0]?.content,
+        value?.output?.[0]?.text,
+        value?.response?.output_text
+      ];
+      for(const candidate of candidates){
+        if(typeof candidate==="string"&&candidate.trim())return candidate;
+        if(Array.isArray(candidate)){
+          const joined=candidate.map(x=>typeof x==="string"?x:(x?.text||x?.content||"")).join("");
+          if(joined.trim())return joined;
+        }
+      }
+      return "";
+    };
+    let generatedText=readGenerated(result);
+    let toolCalls=Array.isArray(result?.tool_calls)?result.tool_calls:(Array.isArray(result?.choices?.[0]?.message?.tool_calls)?result.choices[0].message.tool_calls:[]);
+    // A synchronous Workers AI call can occasionally return an empty generation.
+    // Retry once with a smaller output budget instead of returning a false empty completion.
+    if(!generatedText && !toolCalls.length){
+      const retryInput={...input,max_tokens:Math.min(Number(input.max_tokens)||8192,4096),temperature:0};
+      result=await env.AI.run(model,retryInput);
+      generatedText=readGenerated(result);
+      toolCalls=Array.isArray(result?.tool_calls)?result.tool_calls:(Array.isArray(result?.choices?.[0]?.message?.tool_calls)?result.choices[0].message.tool_calls:[]);
+    }
     const usage=result?.usage||result?.choices?.[0]?.usage||{};
     const normalizedText=typeof generatedText==="string"?generatedText:(Array.isArray(generatedText)?generatedText.map(x=>typeof x==="string"?x:(x?.text||x?.content||"")).join(""):generatedText==null?"":JSON.stringify(generatedText));
     const message={role:"assistant",content:normalizedText||null};

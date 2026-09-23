@@ -110,28 +110,99 @@ async function revoke(req,env,idValue){
   return json({ok:true,id:idValue,active:false});
 }
 
+function apiInfo(req,env){
+  const origin=new URL(req.url).origin;
+  return {
+    service:"Nexora API",
+    status:"online",
+    version:"1.0",
+    model:env.NEXORA_MODEL_NAME||"nexora-coder",
+    provider:"Cloudflare Workers AI",
+    endpoints:{
+      health:origin+"/health",
+      models:origin+"/v1/models",
+      chat_completions:origin+"/v1/chat/completions",
+      admin:origin+"/admin"
+    },
+    authentication:"Bearer API key required for /v1/chat/completions"
+  };
+}
+
 async function models(req,env){
   const origin=new URL(req.url).origin;
-  return json({object:"list",data:[{id:env.NEXORA_MODEL_NAME||"nexora-coder",object:"model",owned_by:"nexora",endpoint:origin+"/v1/chat/completions"}]});
+  return json({object:"list",data:[{id:env.NEXORA_MODEL_NAME||"nexora-coder",object:"model",created:0,owned_by:"nexora",permission:[],root:env.NEXORA_MODEL||"@cf/openai/gpt-oss-120b",endpoint:origin+"/v1/chat/completions"}]});
+}
+
+function normalizeMessages(messages){
+  return messages.map((m)=>({
+    role:String(m?.role||"user"),
+    content:m?.content??null,
+    ...(m?.name?{name:m.name}:{}),
+    ...(m?.tool_call_id?{tool_call_id:m.tool_call_id}:{}),
+    ...(Array.isArray(m?.tool_calls)?{tool_calls:m.tool_calls}: {})
+  }));
 }
 
 async function chat(req,env){
   let keyRow;
-  try{keyRow=await requireKey(req,env);}catch(e){return json({error:{message:"Invalid or revoked API key",type:"authentication_error"}},401);}
+  try{keyRow=await requireKey(req,env);}catch(e){return json({error:{message:"Invalid or revoked API key",type:"authentication_error",code:"invalid_api_key"}},401);}
   const body=await req.json().catch(()=>null);
-  if(!body?.messages||!Array.isArray(body.messages))return json({error:{message:"messages must be an array",type:"invalid_request_error"}},400);
-  const model=body.model||env.NEXORA_MODEL||"@cf/openai/gpt-oss-120b";
-  const input={messages:body.messages,temperature:body.temperature??0.15,max_tokens:body.max_tokens??8192};
+  if(!body?.messages||!Array.isArray(body.messages)||body.messages.length===0)return json({error:{message:"messages must be a non-empty array",type:"invalid_request_error"}},400);
+
+  const model=env.NEXORA_MODEL||"@cf/openai/gpt-oss-120b";
+  const publicModel=env.NEXORA_MODEL_NAME||"nexora-coder";
+  const input={
+    messages:normalizeMessages(body.messages),
+    temperature:body.temperature??0.15,
+    max_tokens:body.max_tokens??8192
+  };
+
+  for(const key of ["top_p","top_k","seed","repetition_penalty","frequency_penalty","presence_penalty","response_format"]){
+    if(body[key]!==undefined)input[key]=body[key];
+  }
   if(body.tools)input.tools=body.tools;
   if(body.tool_choice)input.tool_choice=body.tool_choice;
+  if(body.reasoning)input.reasoning=body.reasoning;
+
   try{
     const result=await env.AI.run(model,input);
-    const text=result?.response??result?.output_text??result?.text??"";
+    const generatedText=result?.response??result?.output_text??result?.text??"";
+    const toolCalls=Array.isArray(result?.tool_calls)?result.tool_calls:[];
     const usage=result?.usage||{};
+    const message={role:"assistant",content:typeof generatedText==="string"?generatedText:(generatedText==null?null:JSON.stringify(generatedText))};
+    if(toolCalls.length)message.tool_calls=toolCalls;
+
     await turso(env,"INSERT INTO usage(key_id,model,tokens_in,tokens_out,created_at) VALUES(?,?,?,?,?)",[keyRow.id,model,usage.prompt_tokens??usage.input_tokens??null,usage.completion_tokens??usage.output_tokens??null,now()]);
-    return json({id:"chatcmpl_"+id(),object:"chat.completion",created:Math.floor(Date.now()/1000),model:env.NEXORA_MODEL_NAME||"nexora-coder",choices:[{index:0,message:{role:"assistant",content:typeof text==="string"?text:JSON.stringify(text)},finish_reason:"stop"}],usage});
+
+    const completion={
+      id:"chatcmpl_"+id(),
+      object:"chat.completion",
+      created:Math.floor(Date.now()/1000),
+      model:publicModel,
+      choices:[{index:0,message,finish_reason:toolCalls.length?"tool_calls":"stop"}],
+      usage
+    };
+
+    if(body.stream===true){
+      const encoder=new TextEncoder();
+      const payloads=[
+        {id:completion.id,object:"chat.completion.chunk",created:completion.created,model:publicModel,choices:[{index:0,delta:{role:"assistant"},finish_reason:null}]},
+        ...(message.content?message.content.split(/(?<=\\s)|(?=\\s)/).filter(Boolean).map(part=>({id:completion.id,object:"chat.completion.chunk",created:completion.created,model:publicModel,choices:[{index:0,delta:{content:part},finish_reason:null}]})):[]),
+        {id:completion.id,object:"chat.completion.chunk",created:completion.created,model:publicModel,choices:[{index:0,delta:{},finish_reason:toolCalls.length?"tool_calls":"stop"}]},
+      ];
+      const stream=new ReadableStream({
+        start(controller){
+          for(const item of payloads)controller.enqueue(encoder.encode("data: "+JSON.stringify(item)+"\\n\\n"));
+          controller.enqueue(encoder.encode("data: [DONE]\\n\\n"));
+          controller.close();
+        }
+      });
+      return new Response(stream,{status:200,headers:{"content-type":"text/event-stream; charset=utf-8","cache-control":"no-cache","access-control-allow-origin":"*","access-control-allow-headers":"Authorization, Content-Type","access-control-allow-methods":"POST, OPTIONS"}});
+    }
+
+    return json(completion);
   }catch(e){
-    return json({error:{message:"Model execution failed",type:"model_error",detail:String(e.message||e)}},502);
+    return json({error:{message:"Model execution failed",type:"model_error",code:"model_execution_failed",detail:String(e?.message||e)}},502);
   }
 }
 
@@ -141,20 +212,29 @@ const p=()=>document.getElementById("p").value;
 async function gen(){const r=await fetch("/admin/keys",{method:"POST",headers:{"X-Admin-Password":p(),"content-type":"application/json"},body:JSON.stringify({label:document.getElementById("l").value})});document.getElementById("out").textContent=JSON.stringify(await r.json(),null,2);load()}
 async function load(){const r=await fetch("/admin/keys",{headers:{"X-Admin-Password":p()}});const j=await r.json();document.getElementById("keys").innerHTML=(j.data||[]).map(x=>"<p><b>"+x.label+"</b> — "+x.key_prefix+"… — "+(x.active?"active":"revoked")+" <button onclick='rev(\""+x.id+"\")'>Revoke</button></p>").join("")}
 async function rev(id){await fetch("/admin/keys/"+id,{method:"DELETE",headers:{"X-Admin-Password":p()}});load()}
-</script></body></html>`
+</script></body></html>`;
 }
 
 export default {async fetch(req,env){
   if(req.method==="OPTIONS")return corsPreflight();
   const u=new URL(req.url);
   try{
+    if(u.pathname==="/"&&req.method==="GET")return json(apiInfo(req,env));
+    if(u.pathname==="/v1"&&req.method==="GET")return json(apiInfo(req,env));
     if(u.pathname==="/admin"&&req.method==="GET")return new Response(adminHtml(),{headers:{"content-type":"text/html;charset=utf-8"}});
     if(u.pathname==="/admin/keys"&&req.method==="POST")return createKey(req,env);
     if(u.pathname==="/admin/keys"&&req.method==="GET")return listKeys(req,env);
     if(u.pathname.startsWith("/admin/keys/")&&req.method==="DELETE")return revoke(req,env,u.pathname.split("/").pop());
     if(u.pathname==="/v1/models"&&req.method==="GET")return models(req,env);
     if(u.pathname==="/v1/chat/completions"&&req.method==="POST")return chat(req,env);
-    if(u.pathname==="/health")return json({ok:true,service:"nexora-api",model:env.NEXORA_MODEL_NAME||"nexora-coder"});
-    return json({error:{message:"Not found"}},404);
-  }catch(e){return json({error:{message:"Internal server error",detail:String(e.message||e)}},500)}
+    if(u.pathname==="/health"&&req.method==="GET"){
+      const health={ok:true,service:"nexora-api",model:env.NEXORA_MODEL_NAME||"nexora-coder",provider:"cloudflare-workers-ai",database:"configured",ai_binding:!!env.AI};
+      try{await turso(env,"SELECT 1");health.database="connected";}catch(e){health.ok=false;health.database="error";health.database_error=String(e?.message||e);}
+      if(!env.AI)health.ok=false;
+      return json(health,health.ok?200:503);
+    }
+    return json({error:{message:"Not found",type:"invalid_request_error",path:u.pathname}},404);
+  }catch(e){
+    return json({error:{message:"Internal server error",type:"server_error",detail:String(e?.message||e)}},500);
+  }
 }};

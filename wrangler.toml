@@ -8,9 +8,3 @@ NEXORA_MODEL_NAME = "nexora-coder"
 
 [ai]
 binding = "AI"
-
-[[d1_databases]]
-binding = "DB"
-database_name = "nexora-api"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
-migrations_dir = "migrations"

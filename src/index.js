@@ -235,35 +235,39 @@ async function chat(req,env){
 }
 
 function adminHtml(){
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Nexora API Admin</title><style>body{font-family:Inter,system-ui;background:#0b0d12;color:#eee;max-width:900px;margin:auto;padding:28px}input,button{padding:12px;border-radius:10px;border:1px solid #333;background:#151923;color:#fff;margin:4px}button{cursor:pointer}section{background:#11151d;border:1px solid #262c38;border-radius:16px;padding:18px;margin:14px 0}code{word-break:break-all}</style></head><body><h1>Nexora API</h1><p>Master Admin</p><section><input id="p" type="password" placeholder="Admin password" autocomplete="current-password"><input id="l" placeholder="Key label" value="Nexora AI"><button id="genBtn" onclick="gen()">Generate API Key</button><div id="status"></div><pre id="out"></pre></section><section><button onclick="load()">Refresh keys</button><div id="keys"></div></section><script>
-const p=()=>document.getElementById("p").value.trim();
-const status=(s,ok=false)=>{const e=document.getElementById("status");e.textContent=s;e.style.cssText="margin:10px 4px;color:"+(ok?"#8ee6a8":"#ff8b8b")+";white-space:pre-wrap"};
-async function gen(){
-  const btn=document.getElementById("genBtn");
-  if(!p()){status("Admin password required.");document.getElementById("p").focus();return}
-  btn.disabled=true;btn.textContent="Generating…";status("Connecting to Turso and generating key…");
-  try{
-    const r=await fetch("/admin/keys",{method:"POST",headers:{"X-Admin-Password":p(),"content-type":"application/json"},body:JSON.stringify({label:document.getElementById("l").value||"Nexora API Key"})});
-    const text=await r.text();let j;try{j=JSON.parse(text)}catch{throw new Error("Server returned invalid response: "+text.slice(0,300))}
-    if(!r.ok||j.error)throw new Error(j.error?.message||("HTTP "+r.status));
-    document.getElementById("out").textContent=JSON.stringify(j,null,2);
-    if(j.key){
-      document.getElementById("out").textContent+="\\n\\nCOPY THIS API KEY NOW — IT IS SHOWN ONLY ONCE.\\n\\nMODEL URL: "+j.model_url+"\\nCHAT URL: "+j.chat_completions_url+"\\nMODELS URL: "+j.models_url;
-      status("API key generated successfully. Copy it now.",true);
-    }else status("Server did not return an API key.");
-    await load();
-  }catch(e){status("Generation failed: "+e.message)}
-  finally{btn.disabled=false;btn.textContent="Generate API Key"}
-}
-async function load(){
-  try{
-    const r=await fetch("/admin/keys",{headers:{"X-Admin-Password":p()}});
-    const j=await r.json().catch(()=>({}));
-    if(!r.ok||j.error){document.getElementById("keys").textContent=j.error?.message||("HTTP "+r.status);return}
-    document.getElementById("keys").innerHTML=(j.data||[]).map(x=>"<p><b>"+x.label+"</b> — "+x.key_prefix+"… — "+(x.active?"active":"revoked")+" <button onclick='rev(\""+x.id+"\")'>Revoke</button></p>").join("")||"No API keys yet.";
-  }catch(e){document.getElementById("keys").textContent="Load failed: "+e.message}
-}
-async function rev(id){try{await fetch("/admin/keys/"+id,{method:"DELETE",headers:{"X-Admin-Password":p()}});await load()}catch(e){status("Revoke failed: "+e.message)}}
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Nexora API Admin</title><style>body{font-family:Inter,system-ui;background:#0b0d12;color:#eee;max-width:900px;margin:auto;padding:28px}input,button{padding:12px;border-radius:10px;border:1px solid #333;background:#151923;color:#fff;margin:4px}button{cursor:pointer}button:disabled{opacity:.55;cursor:wait}section{background:#11151d;border:1px solid #262c38;border-radius:16px;padding:18px;margin:14px 0}pre{white-space:pre-wrap;word-break:break-word}.ok{color:#8ee6a8}.err{color:#ff8b8b}</style></head><body><h1>Nexora API</h1><p>Master Admin</p><section><input id="p" type="password" placeholder="Admin password" autocomplete="current-password"><input id="l" placeholder="Key label" value="Nexora AI"><button id="genBtn" type="button">Generate API Key</button><div id="status">Ready.</div><pre id="out"></pre></section><section><button id="refreshBtn" type="button">Refresh keys</button><div id="keys"></div></section><script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const password=()=>$("p").value.trim();
+  const show=(message,ok=false)=>{const e=$("status");e.textContent=message;e.className=ok?"ok":"err"};
+  async function generate(){
+    const btn=$("genBtn");
+    if(!password()){show("Admin password required.");$("p").focus();return}
+    btn.disabled=true;btn.textContent="Generating…";show("Connecting to Turso and generating key…");
+    try{
+      const response=await fetch("/admin/keys",{method:"POST",headers:{"X-Admin-Password":password(),"Content-Type":"application/json"},body:JSON.stringify({label:$("l").value.trim()||"Nexora AI"})});
+      const raw=await response.text();
+      let data;try{data=JSON.parse(raw)}catch(_){throw new Error("Server returned invalid response: "+raw.slice(0,500))}
+      if(!response.ok||data.error)throw new Error(data.error?.message||("HTTP "+response.status));
+      $("out").textContent=JSON.stringify(data,null,2);
+      show(data.key?"API key generated successfully. Copy it now.":"Server did not return an API key.",!!data.key);
+      await refresh();
+    }catch(error){show("Generation failed: "+(error?.message||error))}
+    finally{btn.disabled=false;btn.textContent="Generate API Key"}
+  }
+  async function refresh(){
+    try{
+      const response=await fetch("/admin/keys",{headers:{"X-Admin-Password":password()}});
+      const data=await response.json().catch(()=>({}));
+      if(!response.ok||data.error){$("keys").textContent=data.error?.message||("HTTP "+response.status);return}
+      $("keys").innerHTML=(data.data||[]).map(x=>"<p><b>"+x.label+"</b> — "+x.key_prefix+"… — "+(x.active?"active":"revoked")+"</p>").join("")||"No API keys yet.";
+    }catch(error){$("keys").textContent="Load failed: "+(error?.message||error)}
+  }
+  $("genBtn").addEventListener("click",generate);
+  $("refreshBtn").addEventListener("click",refresh);
+  $("p").addEventListener("keydown",e=>{if(e.key==="Enter")generate()});
+  show("Ready. Enter Master Admin password and tap Generate API Key.",true);
+})();
 </script></body></html>`;
 }
 

@@ -1,5 +1,8 @@
 const json=(data,status=200,extra={})=>new Response(JSON.stringify(data),{status,headers:{"content-type":"application/json; charset=utf-8","access-control-allow-origin":"*","access-control-allow-headers":"Authorization, Content-Type, X-Admin-Password","access-control-allow-methods":"GET, POST, DELETE, OPTIONS",...extra}});
 const now=()=>new Date().toISOString();
+const publicRate=new Map();
+function isPublic(env){return String(env.NEXORA_PUBLIC_API||"").toLowerCase()==="true";}
+function rateLimit(req){const key=req.headers.get("CF-Connecting-IP")||req.headers.get("X-Forwarded-For")||"unknown";const t=Date.now(),windowMs=60000,max=20;const old=publicRate.get(key)||{start:t,count:0};if(t-old.start>=windowMs){old.start=t;old.count=0}old.count++;publicRate.set(key,old);return old.count<=max;}
 const id=()=>crypto.randomUUID();
 
 function tursoUrl(env){
@@ -99,6 +102,7 @@ function adminOk(req,env){
 }
 
 async function requireKey(req,env){
+  if(isPublic(env))return null;
   await ensureSchema(env);
   const auth=req.headers.get("Authorization")||"";
   const key=auth.startsWith("Bearer ")?auth.slice(7).trim():"";
@@ -152,7 +156,7 @@ function apiInfo(req,env){
       chat_completions:origin+"/v1/chat/completions",
       admin:origin+"/admin"
     },
-    authentication:"Bearer API key required for /v1/chat/completions"
+    authentication:isPublic(env)?"Public keyless mode with rate limiting":"Bearer API key required for /v1/chat/completions"
   };
 }
 
@@ -172,13 +176,13 @@ function normalizeMessages(messages){
 }
 
 async function chat(req,env){
+  if(isPublic(env)&&!rateLimit(req))return json({error:{message:"Rate limit exceeded. Try again in a minute.",type:"rate_limit_error"}},429);
   let keyRow;
   try{keyRow=await requireKey(req,env);}catch(e){return json({error:{message:"Invalid or revoked API key",type:"authentication_error",code:"invalid_api_key"}},401);}
   const body=await req.json().catch(()=>null);
   if(!body?.messages||!Array.isArray(body.messages)||body.messages.length===0)return json({error:{message:"messages must be a non-empty array",type:"invalid_request_error"}},400);
 
-  const model=env.NEXORA_MODEL||"@cf/openai/gpt-oss-120b";
-  const publicModel=env.NEXORA_MODEL_NAME||"nexora-coder";
+  const hasImage=body.messages.some(m=>Array.isArray(m?.content)&&m.content.some(part=>part?.type==="image_url"||part?.type==="image"));\n  const model=hasImage?(env.NEXORA_VISION_MODEL||"@cf/qwen/qwen3.8-27b"):(env.NEXORA_MODEL||"@cf/openai/gpt-oss-120b");\n  const publicModel=env.NEXORA_MODEL_NAME||"nexora-coder";
   const input={
     messages:normalizeMessages(body.messages),
     temperature:body.temperature??0.15,
@@ -200,7 +204,7 @@ async function chat(req,env){
     const message={role:"assistant",content:typeof generatedText==="string"?generatedText:(generatedText==null?null:JSON.stringify(generatedText))};
     if(toolCalls.length)message.tool_calls=toolCalls;
 
-    await turso(env,"INSERT INTO usage(key_id,model,tokens_in,tokens_out,created_at) VALUES(?,?,?,?,?)",[keyRow.id,model,usage.prompt_tokens??usage.input_tokens??null,usage.completion_tokens??usage.output_tokens??null,now()]);
+    if(keyRow)await turso(env,"INSERT INTO usage(key_id,model,tokens_in,tokens_out,created_at) VALUES(?,?,?,?,?)",[keyRow.id,model,usage.prompt_tokens??usage.input_tokens??null,usage.completion_tokens??usage.output_tokens??null,now()]);
 
     const completion={
       id:"chatcmpl_"+id(),
